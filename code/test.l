@@ -1,0 +1,1 @@
+(){A(n:i,tx:S) B=A(2,"tt") B.tx.pr }

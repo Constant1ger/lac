@@ -14,6 +14,8 @@ static void lac_panic(const char *msg) { fprintf(stderr,"lac: %s\n",msg);exit(1)
 static void *lac_alloc(size_t n) { void *p=malloc(n?n:1);if(!p)lac_panic("out of memory");return p; }
 #include "lac_integer.h"
 static lac_str lac_text(const char *text) { size_t n=strlen(text);char *p=lac_alloc(n);memcpy(p,text,n);return (lac_str){p,n}; }
+static lac_str lac_copy_s(lac_str s) { char *p=lac_alloc(s.size);memcpy(p,s.data,s.size);return (lac_str){p,s.size}; }
+static int lac_equal_s(lac_str a,lac_str b) { return a.size==b.size&&(!a.size||!memcmp(a.data,b.data,a.size)); }
 static lac_str lac_concat(lac_str a,lac_str b) { if(a.size>SIZE_MAX-b.size)lac_panic("string too large");char *p=lac_alloc(a.size+b.size);memcpy(p,a.data,a.size);memcpy(p+a.size,b.data,b.size);return (lac_str){p,a.size+b.size}; }
 static void lac_drop_s(lac_str s) { free((void*)s.data); }
 static void lac_pr_s(lac_str s,int newline) { fwrite(s.data,1,s.size,stdout);if(newline)fputc('\n',stdout); }

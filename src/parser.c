@@ -28,11 +28,17 @@ static Expr *primary(Parser *p) {
             if(!accept(p,')'))do {
                 if(call->nargs==32)fail(p->lexer.path,e->line,e->col,"too many arguments");
                 Expr *v=expression(p,1);Arg *a=&call->args[call->nargs++];
-                if(accept(p,'=')){if(v->kind!=E_NAME)fail(p->lexer.path,v->line,v->col,"expected field name");a->name=v->name;v->name=NULL;free(v);v=expression(p,1);}
+                if(accept(p,':')){
+                    if(v->kind!=E_NAME||call->left->kind!=E_NAME)fail(p->lexer.path,v->line,v->col,"expected structure field declaration");
+                    call->kind=E_STRUCT;call->op++;a->name=v->name;v->name=NULL;free(v);
+                    v=node(p,E_NAME);v->name=name(p);
+                }
+                else if(accept(p,'=')){if(v->kind!=E_NAME)fail(p->lexer.path,v->line,v->col,"expected field name");a->name=v->name;v->name=NULL;free(v);v=expression(p,1);}
                 a->value=v;
                 if(accept(p,')'))break;
                 expect(p,',');
             }while(1);
+            if(call->kind==E_STRUCT&&call->op!=call->nargs)fail(p->lexer.path,call->line,call->col,"all structure fields require name:type");
             e=call;
         }else if(accept(p,'.')){Expr *f=alloc(sizeof(*f));f->kind=E_FIELD;f->left=e;f->name=name(p);f->line=e->line;f->col=e->col;e=f;}
         else if(accept(p,'[')){Expr *i=alloc(sizeof(*i));i->kind=E_INDEX;i->left=e;i->right=expression(p,1);i->line=e->line;i->col=e->col;expect(p,']');e=i;}

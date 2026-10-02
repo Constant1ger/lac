@@ -19,7 +19,7 @@ typedef struct Expr Expr;
 typedef struct Stmt Stmt;
 typedef struct { char *name; Expr *value; } Arg;
 struct Expr { int kind, line, col, op; char *name; Expr *left, *right, *third; Arg args[32]; int nargs; };
-enum { E_NUM, E_STR, E_NAME, E_CALL, E_FIELD, E_INDEX, E_UNARY, E_BINARY, E_COND, E_IT, E_FE, E_FOLD };
+enum { E_NUM, E_STR, E_NAME, E_CALL, E_FIELD, E_INDEX, E_UNARY, E_BINARY, E_COND, E_IT, E_FE, E_FOLD, E_STRUCT };
 struct Stmt { int kind, line, col; char *name, *annotation; Expr *expr; Stmt *next; };
 enum { S_BIND, S_EXPR, S_RETURN };
 typedef struct { char *name, *type; int mode; } Param;
