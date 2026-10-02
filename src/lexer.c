@@ -27,6 +27,13 @@ Token lex(Lexer *l) {
     }
     if(isdigit(c)) {
         advance(l);while(isdigit((unsigned char)s[l->pos]))advance(l);
+        if(s[l->pos]=='.'&&isdigit((unsigned char)s[l->pos+1])) {advance(l);while(isdigit((unsigned char)s[l->pos]))advance(l);}
+        if(s[l->pos]=='e'||s[l->pos]=='E') {
+            advance(l);if(s[l->pos]=='+'||s[l->pos]=='-')advance(l);
+            if(!isdigit((unsigned char)s[l->pos]))fail(l->path,t.line,t.col,"exponent requires digits");
+            while(isdigit((unsigned char)s[l->pos]))advance(l);
+        }
+        if(s[l->pos]=='d'||s[l->pos]=='f')advance(l);
         t.kind=T_NUM;t.text=slice(s+start,l->pos-start);return t;
     }
     if(c=='"') {

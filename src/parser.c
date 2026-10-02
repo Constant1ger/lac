@@ -11,6 +11,14 @@ static Expr *primary(Parser *p) {
     if(p->token.kind==T_NUM||p->token.kind==T_STR||p->token.kind==T_ID){
         int k=p->token.kind;e=node(p,k==T_NUM?E_NUM:k==T_STR?E_STR:E_NAME);e->name=slice(p->token.text,strlen(p->token.text));next(p);
     } else if(accept(p,'(')){e=expression(p,1);expect(p,')');}
+    else if(accept(p,'.')) {
+        e=alloc(sizeof(*e));e->kind=E_IT;e->line=p->token.line;e->col=p->token.col;
+        if(p->token.kind==T_ID){Expr *f=node(p,E_FIELD);f->left=e;f->name=name(p);e=f;}
+    }
+    else if(accept(p,'+')) {
+        e=alloc(sizeof(*e));e->kind=E_BINARY;e->op='+';e->line=p->token.line;e->col=p->token.col;
+        e->left=alloc(sizeof(*e));e->left->kind=E_IT;e->left->line=e->line;e->left->col=e->col;e->right=primary(p);return e;
+    }
     else if(p->token.kind=='&'||p->token.kind=='*'||p->token.kind=='!'||p->token.kind=='-') {
         e=node(p,E_UNARY);e->op=p->token.kind;next(p);e->left=primary(p);return e;
     } else fail(p->lexer.path,p->token.line,p->token.col,"expected expression, got '%s'",p->token.text);
@@ -28,6 +36,21 @@ static Expr *primary(Parser *p) {
             e=call;
         }else if(accept(p,'.')){Expr *f=alloc(sizeof(*f));f->kind=E_FIELD;f->left=e;f->name=name(p);f->line=e->line;f->col=e->col;e=f;}
         else if(accept(p,'[')){Expr *i=alloc(sizeof(*i));i->kind=E_INDEX;i->left=e;i->right=expression(p,1);i->line=e->line;i->col=e->col;expect(p,']');e=i;}
+        else if(p->token.kind=='{') {
+            Expr *method=e,*receiver=NULL,*initial=NULL;char *acc=NULL;int fold=0;
+            if(method->kind==E_FIELD&&!strcmp(method->name,"fe"))receiver=method->left;
+            else if(method->kind==E_CALL&&method->left->kind==E_FIELD&&!strcmp(method->left->name,"fld")) {
+                fold=1;receiver=method->left->left;
+                if(method->nargs!=1)fail(p->lexer.path,method->line,method->col,"fld expects one accumulator declaration");
+                Arg *a=&method->args[0];
+                if(a->name){acc=a->name;a->name=NULL;initial=a->value;a->value=NULL;}
+                else if(a->value->kind==E_NAME){acc=a->value->name;a->value->name=NULL;}
+                else fail(p->lexer.path,method->line,method->col,"fld requires accumulator name");
+            }else fail(p->lexer.path,method->line,method->col,"unsupported trailing block");
+            Expr *loop=node(p,fold?E_FOLD:E_FE);loop->left=receiver;loop->third=initial;loop->name=acc;
+            if(fold)method->left->left=NULL;else method->left=NULL;
+            free_expression(method);expect(p,'{');loop->op=accept(p,'@');loop->right=expression(p,1);expect(p,'}');e=loop;
+        }
         else break;
     }
     return e;
@@ -37,6 +60,7 @@ static Expr *expression(Parser *p,int min) {
     while(prec(p->token.kind)>=min) {
         int op=p->token.kind,pr=prec(op);Expr *b=node(p,E_BINARY);next(p);b->op=op;b->left=e;b->right=expression(p,pr+1);e=b;
     }
+    if(min==1&&accept(p,'?')){Expr *c=node(p,E_COND);c->left=e;c->right=expression(p,1);expect(p,':');c->third=expression(p,1);e=c;}
     return e;
 }
 static Stmt *block(Parser *p) {
@@ -61,8 +85,18 @@ Program parse(const char *source,const char *path) {
     Parser p={{source,path,0,1,1},{0,0,0,NULL}};next(&p);Program program={0};
     while(p.token.kind!=T_EOF) {
         if(accept(&p,';'))continue;
+        if(p.token.kind==T_ID&&!strcmp(p.token.text,"import")) {
+            next(&p);if(program.nimports==32)fail(path,p.token.line,p.token.col,"too many imports");
+            char *header;
+            if(p.token.kind==T_STR){header=slice(p.token.text,strlen(p.token.text));next(&p);}
+            else {char *base=name(&p);expect(&p,'.');char *ext=name(&p);header=alloc(strlen(base)+strlen(ext)+2);sprintf(header,"%s.%s",base,ext);free(base);free(ext);}
+            program.imports[program.nimports++]=header;continue;
+        }
         if(program.nfunctions==64)fail(path,p.token.line,p.token.col,"too many functions");
-        Function *f=&program.functions[program.nfunctions++];f->line=p.token.line;f->name=name(&p);expect(&p,'(');
+        Function *f=&program.functions[program.nfunctions++];f->line=p.token.line;f->result_kind=-1;f->result_detail=-1;
+        if(p.token.kind==T_ID){f->name=name(&p);f->assigned=accept(&p,'=');}
+        else {char anon[32];snprintf(anon,sizeof(anon),"_anonymous_%d",program.nfunctions);f->name=slice(anon,strlen(anon));}
+        expect(&p,'(');
         if(!accept(&p,')'))do {
             if(f->nparams==16)fail(path,p.token.line,p.token.col,"too many parameters");
             Param *a=&f->params[f->nparams++];a->name=name(&p);
@@ -81,7 +115,8 @@ Expr *parse_expression_text(const char *source,const char *path) {
     if(p.token.kind!=T_EOF)fail(path,p.token.line,p.token.col,"unexpected interpolation token '%s'",p.token.text);
     free(p.token.text);return e;
 }
-void free_expression(Expr *e) { if(!e)return;free_expression(e->left);free_expression(e->right);for(int i=0;i<e->nargs;i++){free(e->args[i].name);free_expression(e->args[i].value);}free(e->name);free(e); }
+void free_expression(Expr *e) { if(!e)return;free_expression(e->left);free_expression(e->right);free_expression(e->third);for(int i=0;i<e->nargs;i++){free(e->args[i].name);free_expression(e->args[i].value);}free(e->name);free(e); }
 void free_program(Program *p) {
+    for(int i=0;i<p->nimports;i++)free(p->imports[i]);
     for(int i=0;i<p->nfunctions;i++){Function *f=&p->functions[i];free(f->name);free(f->result);for(int j=0;j<f->nparams;j++){free(f->params[j].name);free(f->params[j].type);}Stmt *s=f->body;while(s){Stmt *n=s->next;free(s->name);free(s->annotation);free_expression(s->expr);free(s);s=n;}}
 }
