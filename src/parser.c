@@ -5,6 +5,11 @@ static void expect(Parser *p,int k) { if(!accept(p,k))fail(p->lexer.path,p->toke
 static char *name(Parser *p) { if(p->token.kind!=T_ID)fail(p->lexer.path,p->token.line,p->token.col,"expected name");char *s=slice(p->token.text,strlen(p->token.text));next(p);return s; }
 static Expr *expression(Parser *p,int min);
 static Stmt *block(Parser *p);
+static int brace_fields(Lexer lexer) {
+    Token field=lex(&lexer),colon=lex(&lexer),type=lex(&lexer),end=lex(&lexer);
+    int yes=field.kind==T_ID&&colon.kind==':'&&type.kind==T_ID&&(end.kind==','||end.kind=='}');
+    free(field.text);free(colon.text);free(type.text);free(end.text);return yes;
+}
 static Expr *node(Parser *p,int kind) { Expr *e=alloc(sizeof(*e));e->kind=kind;e->line=p->token.line;e->col=p->token.col;return e; }
 static int prec(int op) { switch(op){case '|':return 1;case '^':return 2;case '&':return 3;case '#':case '~':case '>':case '<':return 4;case '+':case '-':return 5;case '*':case '/':case '%':return 6;default:return 0;} }
 static Expr *lambda(Parser *p) {
@@ -52,6 +57,16 @@ static Expr *primary(Parser *p) {
         }else if(accept(p,'.')){Expr *f=alloc(sizeof(*f));f->kind=E_FIELD;f->left=e;f->name=name(p);f->line=e->line;f->col=e->col;e=f;}
         else if(accept(p,'[')){Expr *i=alloc(sizeof(*i));i->kind=E_INDEX;i->left=e;i->right=expression(p,1);i->line=e->line;i->col=e->col;expect(p,']');e=i;}
         else if(p->token.kind=='{') {
+            if(e->kind==E_NAME&&brace_fields(p->lexer)){
+                Expr *decl=node(p,E_STRUCT);decl->left=e;expect(p,'{');
+                do{
+                    if(decl->nargs==32)fail(p->lexer.path,decl->line,decl->col,"too many structure fields");
+                    Arg *field=&decl->args[decl->nargs++];field->name=name(p);expect(p,':');field->value=node(p,E_NAME);field->value->name=name(p);
+                    if(accept(p,'}'))break;
+                    expect(p,',');
+                }while(1);
+                e=decl;continue;
+            }
             Expr *method=e,*receiver=NULL,*initial=NULL;char *acc=NULL;int fold=0;
             if(method->kind==E_FIELD&&!strcmp(method->name,"fe"))receiver=method->left;
             else if(method->kind==E_CALL&&method->left->kind==E_FIELD&&!strcmp(method->left->name,"fld")) {
@@ -78,11 +93,7 @@ static Expr *expression(Parser *p,int min) {
     if(min==1&&accept(p,'?')){Expr *c=node(p,E_COND);c->left=e;c->right=expression(p,1);expect(p,':');c->third=expression(p,1);e=c;}
     return e;
 }
-static Stmt *block(Parser *p) {
-    expect(p,'{');Stmt *first=NULL,**tail=&first;
-    while(!accept(p,'}')) {
-        if(p->token.kind==T_EOF)fail(p->lexer.path,p->token.line,p->token.col,"unterminated block");
-        if(accept(p,';'))continue;
+static Stmt *statement(Parser *p) {
         Stmt *s=alloc(sizeof(*s));s->line=p->token.line;s->col=p->token.col;
         if(accept(p,'@')){s->kind=S_RETURN;s->expr=expression(p,1);}
         else {
@@ -92,12 +103,36 @@ static Stmt *block(Parser *p) {
                 s->kind=S_BIND;s->name=e->name;e->name=NULL;free(e);s->expr=expression(p,1);
             }else{s->kind=S_EXPR;s->expr=e;}
         }
-        *tail=s;tail=&s->next;
+        return s;
+}
+static Stmt *block(Parser *p) {
+    expect(p,'{');Stmt *first=NULL,**tail=&first;
+    while(!accept(p,'}')) {
+        if(p->token.kind==T_EOF)fail(p->lexer.path,p->token.line,p->token.col,"unterminated block");
+        if(accept(p,';'))continue;
+        *tail=statement(p);tail=&(*tail)->next;
     }
     return first;
 }
+static int function_definition(Parser *p) {
+    if(p->token.kind=='{')return 1;
+    if(p->token.kind!=T_ID&&p->token.kind!='(')return 0;
+    Lexer lexer=p->lexer;Token t={0};int kind=p->token.kind;
+    if(kind==T_ID){
+        t=lex(&lexer);kind=t.kind;free(t.text);
+        if(kind=='='){t=lex(&lexer);kind=t.kind;free(t.text);}
+        if(kind=='{')return !brace_fields(lexer);
+        if(kind!='(')return 0;
+    }
+    int depth=1;
+    while(depth){t=lex(&lexer);kind=t.kind;free(t.text);if(kind==T_EOF)return 0;if(kind=='(')depth++;else if(kind==')')depth--;}
+    t=lex(&lexer);kind=t.kind;free(t.text);
+    if(kind==':'){t=lex(&lexer);int typed=t.kind==T_ID;free(t.text);if(!typed)return 0;t=lex(&lexer);kind=t.kind;free(t.text);}
+    return kind=='{';
+}
 Program parse(const char *source,const char *path) {
     Program program={0};Parser p={{source,path,0,1,1},{0,0,0,NULL},&program};next(&p);
+    Stmt *script=NULL,**script_tail=&script;int standalone=0;
     while(p.token.kind!=T_EOF) {
         if(accept(&p,';'))continue;
         if(p.token.kind==T_ID&&!strcmp(p.token.text,"import")) {
@@ -107,10 +142,12 @@ Program parse(const char *source,const char *path) {
             else {char *base=name(&p);expect(&p,'.');char *ext=name(&p);header=alloc(strlen(base)+strlen(ext)+2);sprintf(header,"%s.%s",base,ext);free(base);free(ext);}
             program.imports[program.nimports++]=header;continue;
         }
+        if(!function_definition(&p)){*script_tail=statement(&p);script_tail=&(*script_tail)->next;continue;}
         if(program.nfunctions==64)fail(path,p.token.line,p.token.col,"too many functions");
         Function *f=&program.functions[program.nfunctions++];f->line=p.token.line;f->result_kind=-1;f->result_detail=-1;
         if(p.token.kind==T_ID){f->name=name(&p);f->assigned=accept(&p,'=');}
         else {char anon[32];snprintf(anon,sizeof(anon),"_anonymous_%d",program.nfunctions);f->name=slice(anon,strlen(anon));}
+        if(!f->assigned)standalone++;
         if(p.token.kind!='{'){
         expect(&p,'(');
         if(!accept(&p,')'))do {
@@ -124,6 +161,11 @@ Program parse(const char *source,const char *path) {
         if(accept(&p,':'))f->result=name(&p);
         }
         f->body=block(&p);
+    }
+    if(script&&standalone)fail(path,script->line,script->col,"top-level statements cannot coexist with standalone functions; put statements inside main");
+    if(script||!program.nfunctions){
+        if(program.nfunctions==64)fail(path,1,1,"too many functions");
+        Function *entry=&program.functions[program.nfunctions++];entry->name=slice("_script_main",12);entry->line=1;entry->result_kind=entry->result_detail=-1;entry->body=script;
     }
     free(p.token.text);return program;
 }

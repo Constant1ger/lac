@@ -81,4 +81,5 @@ foreach ($item in $taskNegatives.GetEnumerator()) {
 & (Join-Path $PSScriptRoot 'test-bignum.ps1')
 & (Join-Path $PSScriptRoot 'test-structures.ps1')
 & (Join-Path $PSScriptRoot 'test-scopes.ps1')
+& (Join-Path $PSScriptRoot 'test-scripts.ps1')
 Write-Output 'PASS: zero/zero2, arrays/fe/fld, empty fold, floating types, C imports, branch short circuit, strict calls and 21 compiler diagnostics'
