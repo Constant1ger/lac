@@ -1,0 +1,1 @@
+{ a(n:i,tx:S) f=a(2,"tt") D=A(2,"tt") prl(f#D) prl(f~D) } 

@@ -3,10 +3,10 @@
 #include <errno.h>
 #include <limits.h>
 
-typedef struct { int kind, detail, mode; char code[80]; int temp; } Value;
+typedef struct { int kind, detail, mode, stack; char code[80]; int temp; } Value;
 typedef struct { char *name; Value value; int moved; } Symbol;
 typedef struct { char *name; char *fields[32]; int kinds[32], nfields, declared; } Structure;
-typedef struct { int kind, detail; char name[80]; } Temporary;
+typedef struct { int kind, detail, stack; char name[80]; } Temporary;
 typedef struct {
     Program *program; const char *path; FILE *out; Structure structures[32];int nstructures;
     Symbol symbols[128];int nsymbols;Temporary temps[512];int ntemps,counter;
@@ -17,7 +17,8 @@ static _Noreturn void error(Gen *g,Expr *e,const char *msg){fail(g->path,e?e->li
 static void put(Gen *g,const char *fmt,...) {va_list ap;va_start(ap,fmt);vfprintf(g->out,fmt,ap);va_end(ap);}
 static Value val(int k,const char *code){Value v={0};v.kind=k;v.detail=-1;v.temp=-1;if(code)snprintf(v.code,sizeof(v.code),"%s",code);return v;}
 static int func_index(Gen *g,const char *s){for(int i=0;i<g->program->nfunctions;i++)if(!strcmp(g->program->functions[i].name,s))return i;return -1;}
-static int struct_index(Gen *g,const char *s){for(int i=0;i<g->nstructures;i++)if(!strcmp(g->structures[i].name,s))return i;return -1;}
+static int same_structure_name(const char *a,const char *b) { return tolower((unsigned char)a[0])==tolower((unsigned char)b[0])&&!strcmp(a+1,b+1); }
+static int struct_index(Gen *g,const char *s){for(int i=0;i<g->nstructures;i++)if(same_structure_name(g->structures[i].name,s))return i;return -1;}
 static Symbol *symbol(Gen *g,const char *s){for(int i=g->nsymbols-1;i>=0;i--)if(!strcmp(g->symbols[i].name,s))return &g->symbols[i];return NULL;}
 static void add_symbol(Gen *g,char *name,Value v) {
     if(symbol(g,name))fail(g->path,1,1,"duplicate variable '%s' (reassignment is not supported in bootstrap)",name);
@@ -47,7 +48,7 @@ static const char *drop_function(Temporary *t) {
     if(t->kind==K_INT)return "lac_drop_i";
     if(t->kind==K_STR)return "lac_drop_s";
     if(t->kind==K_ARRAY)return "lac_drop_array";
-    snprintf(name,sizeof(name),"lac_drop_struct_%d",t->detail);return name;
+    snprintf(name,sizeof(name),t->stack?"lac_clear_struct_%d":"lac_drop_struct_%d",t->detail);return name;
 }
 static void cleanup(Gen *g,int except) {
     for(int i=g->ntemps-1;i>=0;i--)if(i!=except){Temporary *t=&g->temps[i];put(g,"  %s(%s);\n",drop_function(t),t->name);}
@@ -99,7 +100,6 @@ static void find_structs(Gen *g,Expr *e) {
     if(!e)return;
     if(e->kind==E_STRUCT){
         char *name=e->left->name;
-        if(!isupper((unsigned char)name[0]))error(g,e,"structure declaration name must start uppercase");
         if(struct_index(g,name)>=0)error(g,e,"duplicate structure declaration");
         if(g->nstructures==32)error(g,e,"too many structures");
         Structure *s=&g->structures[g->nstructures++];s->name=name;s->nfields=e->nargs;s->declared=1;
@@ -113,7 +113,6 @@ static void find_structs(Gen *g,Expr *e) {
     }
     if(e->kind==E_CALL&&e->left->kind==E_NAME&&e->nargs&&e->args[0].name){
         char *name=e->left->name;int idx=struct_index(g,name);
-        if(!isupper((unsigned char)name[0]))error(g,e,"stack structure constructors not implemented in bootstrap");
         for(int j=0;j<e->nargs;j++)for(int k=0;k<j;k++)if(e->args[j].name&&e->args[k].name&&!strcmp(e->args[j].name,e->args[k].name))error(g,e,"duplicate constructor field");
         if(idx<0){if(g->nstructures==32)error(g,e,"too many structures");idx=g->nstructures++;g->structures[idx].name=name;g->structures[idx].nfields=e->nargs;for(int j=0;j<e->nargs;j++){if(!e->args[j].name)error(g,e,"all constructor fields must be named");g->structures[idx].fields[j]=e->args[j].name;g->structures[idx].kinds[j]=K_INT;}}
         else {Structure *s=&g->structures[idx];if(s->nfields!=e->nargs)error(g,e,"constructor field count mismatch");for(int j=0;j<e->nargs;j++)if(!e->args[j].name||strcmp(s->fields[j],e->args[j].name))error(g,e,"constructor field order mismatch");}
@@ -122,6 +121,18 @@ static void find_structs(Gen *g,Expr *e) {
 }
 static Foreign *foreign(Gen *g,const char *name) {for(int i=0;i<g->imports->count;i++)if(!strcmp(g->imports->functions[i].name,name))return &g->imports->functions[i];return NULL;}
 static const char *copy_function(int kind) { return kind==K_INT?"lac_copy_i(":kind==K_STR?"lac_copy_s(":""; }
+static Value new_structure(Gen *g,int idx,int stack) {
+    char object[32];snprintf(object,sizeof(object),"object%d",g->counter++);
+    if(stack)put(g,"  lac_struct_%d %s;\n",idx,object);
+    Value v=temporary(g,K_POINT,idx);v.stack=stack;g->temps[v.temp].stack=stack;
+    if(stack)put(g," = &%s;\n",object);else put(g," = lac_alloc(sizeof(*%s));\n",v.code);
+    return v;
+}
+static Value copy_structure(Gen *g,Value source,int stack) {
+    Structure *s=&g->structures[source.detail];Value v=new_structure(g,source.detail,stack);
+    for(int j=0;j<s->nfields;j++)put(g,"  %s->f%d = %s%s->f%d%s;\n",v.code,j,copy_function(s->kinds[j]),source.code,j,s->kinds[j]==K_INT||s->kinds[j]==K_STR?")":"");
+    return v;
+}
 static Value emit_foreign(Gen *g,Expr *e,Foreign *f) {
     if(f->variadic||f->result==K_UNSUPPORTED)error(g,e,"unsupported C function signature");
     if(e->nargs!=f->nargs)error(g,e,"C function argument count mismatch");
@@ -139,7 +150,10 @@ static Value emit_foreign(Gen *g,Expr *e,Foreign *f) {
     put(g,f->result==K_INT?"));\n":");\n");for(int j=0;j<e->nargs;j++)if(adapters[j][0])put(g,"  free(%s);\n",adapters[j]);return v;
 }
 static Value emit_call(Gen *g,Expr *e) {
-    if(e->left->kind!=E_NAME)error(g,e,"only named function calls supported in bootstrap");
+    if(e->left->kind!=E_NAME){
+        Value target=emit(g,e->left);if(target.kind!=K_FUNC)error(g,e,"value is not callable");
+        Expr name={0},call=*e;name.kind=E_NAME;name.name=g->program->functions[target.detail].name;call.left=&name;return emit_call(g,&call);
+    }
     char *name=e->left->name;
     if(!strcmp(name,"pr")||!strcmp(name,"prl")) {
         if(e->nargs!=1)error(g,e,"print expects one argument");
@@ -163,16 +177,14 @@ static Value emit_call(Gen *g,Expr *e) {
         Structure *s=&g->structures[idx];Value args[32];for(int j=0;j<e->nargs;j++)args[j]=emit(g,e->args[j].value);
         if(e->nargs==1&&!e->args[0].name&&args[0].kind==K_POINT) {
             if(args[0].detail!=idx||args[0].mode!='&')error(g,e,"copy constructor requires & of same structure");
-            Value v=temporary(g,K_POINT,idx);put(g," = lac_alloc(sizeof(*%s));\n",v.code);
-            for(int j=0;j<s->nfields;j++)put(g,"  %s->f%d = %s%s->f%d%s;\n",v.code,j,copy_function(s->kinds[j]),args[0].code,j,s->kinds[j]==K_INT||s->kinds[j]==K_STR?")":"");
-            return v;
+            return copy_structure(g,args[0],!isupper((unsigned char)name[0]));
         }
         if(e->nargs!=s->nfields)error(g,e,"constructor argument count mismatch");
         for(int j=0;j<e->nargs;j++){
             if(args[j].kind!=s->kinds[j])error(g,e->args[j].value,"constructor field type mismatch");
             if(e->args[j].name&&strcmp(e->args[j].name,s->fields[j]))error(g,e,"constructor field order mismatch");
         }
-        Value v=temporary(g,K_POINT,idx);put(g," = lac_alloc(sizeof(*%s));\n",v.code);
+        Value v=new_structure(g,idx,!isupper((unsigned char)name[0]));
         for(int j=0;j<e->nargs;j++)put(g,"  %s->f%d = %s%s%s;\n",v.code,j,copy_function(s->kinds[j]),args[j].code,s->kinds[j]==K_INT||s->kinds[j]==K_STR?")":"");
         return v;
     }
@@ -187,12 +199,16 @@ static Value emit_call(Gen *g,Expr *e) {
         args[j]=emit(g,e->args[j].value);int d=-1,k=type_kind(g,f->params[j].type,&d);
         if(k!=args[j].kind||(k==K_POINT&&d!=args[j].detail))fail(g->path,e->args[j].value->line,e->args[j].value->col,"function '%s' argument %d: expected %s, got %s",name,j+1,f->params[j].type,args[j].kind==K_INT?"i":ctype(g,args[j].kind,args[j].detail));
         if(f->params[j].mode!=args[j].mode)error(g,e,"function argument borrow mode mismatch");
-        for(int n=0;n<j;n++)if(k==K_POINT&&!strcmp(args[n].code,args[j].code)&&(args[n].mode=='*'||args[j].mode=='*'||!args[j].mode))error(g,e,"conflicting simultaneous arguments to same object");
-        if(k==K_POINT&&!f->params[j].mode)error(g,e,"owned function parameters not implemented in bootstrap");
+        for(int n=0;n<j;n++)if(k==K_POINT&&!strcmp(args[n].code,args[j].code)&&(args[n].mode=='*'||args[j].mode=='*'||(!args[j].mode&&!args[j].stack)))error(g,e,"conflicting simultaneous arguments to same object");
+        if(k==K_POINT&&!f->params[j].mode){
+            if(isupper((unsigned char)f->params[j].type[0]))error(g,e,"owned heap function parameters not implemented in bootstrap");
+            if(!args[j].stack)error(g,e,"stack parameter requires stack structure value");
+        }
     }
     infer_function(g,fi);int d=f->result_detail,k=f->result_kind;Value v=val(K_VOID,NULL);
-    if(k!=K_VOID){v=temporary(g,k,d);put(g," = ");}else put(g,"  ");
-    put(g,"lac_fn_%d(",fi);for(int j=0;j<e->nargs;j++)put(g,"%s%s",j?",":"",args[j].code);put(g,");\n");return v;
+    if(k==K_POINT&&f->result_stack){v=new_structure(g,d,1);put(g,"  *%s = ",v.code);}
+    else if(k!=K_VOID){v=temporary(g,k,d);put(g," = ");}else put(g,"  ");
+    put(g,"lac_fn_%d(",fi);for(int j=0;j<e->nargs;j++)put(g,"%s%s%s",j?",":"",args[j].kind==K_POINT&&!f->params[j].mode?"*":"",args[j].code);put(g,");\n");return v;
 }
 static Value emit(Gen *g,Expr *e) {
     switch(e->kind) {
@@ -208,6 +224,7 @@ static Value emit(Gen *g,Expr *e) {
     case E_STR:return emit_string(g,e);
     case E_NAME:{if(!strcmp(e->name,"true")||!strcmp(e->name,"false"))return val(K_BOOL,!strcmp(e->name,"true")?"1":"0");Symbol *s=symbol(g,e->name);if(s){if(s->moved)error(g,e,"use after move");return s->value;}int fi=func_index(g,e->name);if(fi>=0){Value v=val(K_FUNC,NULL);v.detail=fi;return v;}Foreign *f=foreign(g,e->name);if(f){Expr call={0};call.kind=E_CALL;call.left=e;call.line=e->line;call.col=e->col;return emit_foreign(g,&call,f);}error(g,e,"unknown variable");break;}
     case E_CALL:return emit_call(g,e);
+    case E_LAMBDA:{Value v=val(K_FUNC,NULL);v.detail=e->op;return v;}
     case E_STRUCT:return val(K_VOID,NULL);
     case E_INDEX:{
         if(e->left->kind==E_NAME&&(!strcmp(e->left->name,"i")||!strcmp(e->left->name,"d")||!strcmp(e->left->name,"f"))) {
@@ -234,7 +251,7 @@ static Value emit(Gen *g,Expr *e) {
     case E_BINARY:{Value a=emit(g,e->left);
         if(e->op=='&'||e->op=='|'){if(a.kind!=K_BOOL)error(g,e,"logical operation requires bool");Value v=temporary(g,K_BOOL,-1);put(g," = %s;\n  if(%s%s) {\n",a.code,e->op=='|'?"!":"",v.code);int before=g->ntemps;Value b=emit(g,e->right);if(b.kind!=K_BOOL)error(g,e,"logical operation requires bool");put(g,"  %s = %s;\n",v.code,b.code);scoped_cleanup(g,before);put(g,"  }\n");return v;}
         Value b=emit(g,e->right);if(a.kind!=b.kind||(a.kind==K_POINT&&a.detail!=b.detail))error(g,e,"comparison or arithmetic type mismatch");
-        if(a.kind==K_POINT&&(e->op=='#'||e->op=='~')){Value v=temporary(g,K_BOOL,-1);put(g," = ");if(e->op=='#')put(g,"%s == %s",a.code,b.code);else{Structure *s=&g->structures[a.detail];for(int j=0;j<s->nfields;j++){
+        if(a.kind==K_POINT&&(e->op=='#'||e->op=='~')){Value v=temporary(g,K_BOOL,-1);put(g," = ");if(e->op=='#'){if(!strcmp(a.code,b.code))put(g,"1");else put(g,"%s == %s",a.code,b.code);}else{Structure *s=&g->structures[a.detail];for(int j=0;j<s->nfields;j++){
             put(g,"%s",j?" && ":"");
             if(s->kinds[j]==K_INT)put(g,"(lac_cmp_i(%s->f%d,%s->f%d) == 0)",a.code,j,b.code,j);
             else if(s->kinds[j]==K_STR)put(g,"lac_equal_s(%s->f%d,%s->f%d)",a.code,j,b.code,j);
@@ -287,38 +304,51 @@ static Value emit(Gen *g,Expr *e) {
 static void parameters(Gen *g,int fi) {
     Function *f=&g->program->functions[fi];g->current=f;g->nsymbols=g->ntemps=g->counter=g->has_it=0;
     if(fi==g->entry){if(f->nparams)add_symbol(g,f->params[0].name,val(K_ARGS,"arg0"));}
-    else for(int j=0;j<f->nparams;j++){int d=-1,k=type_kind(g,f->params[j].type,&d);if(k==K_VOID)fail(g->path,f->line,1,"parameter type is required outside entry");char code[32];snprintf(code,sizeof(code),"arg%d",j);Value v=val(k,code);v.detail=d;v.mode=f->params[j].mode;add_symbol(g,f->params[j].name,v);}
+    else for(int j=0;j<f->nparams;j++){int d=-1,k=type_kind(g,f->params[j].type,&d);if(k==K_VOID)fail(g->path,f->line,1,"parameter type is required outside entry");int stack=k==K_POINT&&!f->params[j].mode&&islower((unsigned char)f->params[j].type[0]);char code[32];snprintf(code,sizeof(code),stack?"(&arg%d)":"arg%d",j);Value v=val(k,code);v.detail=d;v.mode=f->params[j].mode;v.stack=stack;add_symbol(g,f->params[j].name,v);}
 }
 static char *binding_source(Expr *e) {if(e->kind==E_NAME)return e->name;if(e->kind==E_FE)return binding_source(e->left);return NULL;}
 static void binding(Gen *g,Stmt *s,Value v) {
     if(v.kind==K_VOID)error(g,s->expr,"cannot bind void result");
     if((v.kind==K_INT||v.kind==K_BOOL||v.kind==K_DOUBLE||v.kind==K_FLOAT)&&isupper((unsigned char)s->name[0]))error(g,s->expr,"heap primitives not implemented in bootstrap");
-    if(v.kind==K_POINT&&!isupper((unsigned char)s->name[0]))error(g,s->expr,"heap structure owner name must start uppercase");
+    if(v.kind==K_POINT&&v.stack&&isupper((unsigned char)s->name[0]))error(g,s->expr,"stack structure name must start lowercase");
+    if(v.kind==K_POINT&&!v.stack&&!isupper((unsigned char)s->name[0]))error(g,s->expr,"heap structure owner name must start uppercase");
     if(v.mode&&v.kind==K_POINT)error(g,s->expr,"stored borrowing not supported in bootstrap");
     char *source=binding_source(s->expr);
+    if(v.kind==K_POINT&&v.stack&&source)v=copy_structure(g,v,1);
     if(v.kind==K_INT&&source){Value copy=temporary(g,K_INT,-1);put(g," = lac_copy_i(%s);\n",v.code);v=copy;}
-    if(source&&(v.kind==K_POINT||v.kind==K_ARRAY||(v.kind==K_STR&&v.temp>=0))){Symbol *old=symbol(g,source);if(old)old->moved=1;}
+    if(source&&((v.kind==K_POINT&&!v.stack)||v.kind==K_ARRAY||(v.kind==K_STR&&v.temp>=0))){Symbol *old=symbol(g,source);if(old)old->moved=1;}
     add_symbol(g,s->name,v);
 }
 static void infer_function(Gen *g,int fi) {
     Function *f=&g->program->functions[fi];if(f->result_kind>=0)return;
     if(f->inferring)fail(g->path,f->line,1,"recursive function requires declared return type");
-    if(f->result){f->result_kind=type_kind(g,f->result,&f->result_detail);return;}
+    if(f->result){f->result_kind=type_kind(g,f->result,&f->result_detail);f->result_stack=f->result_kind==K_POINT&&islower((unsigned char)f->result[0]);return;}
     f->inferring=1;Gen *worker=alloc(sizeof(*worker));*worker=*g;worker->out=tmpfile();
     if(!worker->out)fail(g->path,1,1,"cannot create type inference scratch file");
     parameters(worker,fi);
     int kind=K_VOID,detail=-1,have_return=0;
     for(Stmt *s=f->body;s;s=s->next){Value v=emit(worker,s->expr);if(s->kind==S_BIND)binding(worker,s,v);
-        if(s->kind==S_RETURN){if(have_return&&(v.kind!=kind||v.detail!=detail))error(g,s->expr,"inconsistent return types");kind=v.kind;detail=v.detail;have_return=1;}}
+        if(s->kind==S_RETURN){if(have_return&&(v.kind!=kind||v.detail!=detail||(v.kind==K_POINT&&f->result_stack!=v.stack)))error(g,s->expr,"inconsistent return types");kind=v.kind;detail=v.detail;f->result_stack=v.kind==K_POINT&&v.stack;have_return=1;}}
     fclose(worker->out);free(worker);f->result_kind=kind;f->result_detail=detail;f->inferring=0;
 }
 static void signature(Gen *g,int fi,int prototype) {
     Function *f=&g->program->functions[fi];int d=f->result_detail,k=f->result_kind;
-    put(g,"static %s lac_fn_%d(",ctype(g,k,d),fi);
+    if(k==K_POINT&&f->result_stack)put(g,"static lac_struct_%d lac_fn_%d(",d,fi);else put(g,"static %s lac_fn_%d(",ctype(g,k,d),fi);
     if(fi==g->entry)put(g,"lac_args arg0");
     else if(!f->nparams)put(g,"void");
-    else for(int j=0;j<f->nparams;j++){int detail=-1;int kind=type_kind(g,f->params[j].type,&detail);if(kind==K_VOID)fail(g->path,f->line,1,"parameter type is required outside entry");if(kind==K_POINT&&f->params[j].mode=='&')put(g,"%sconst lac_struct_%d *arg%d",j?",":"",detail,j);else put(g,"%s%s arg%d",j?",":"",ctype(g,kind,detail),j);}
+    else for(int j=0;j<f->nparams;j++){int detail=-1;int kind=type_kind(g,f->params[j].type,&detail);if(kind==K_VOID)fail(g->path,f->line,1,"parameter type is required outside entry");if(kind==K_POINT&&f->params[j].mode=='&')put(g,"%sconst lac_struct_%d *arg%d",j?",":"",detail,j);else if(kind==K_POINT&&!f->params[j].mode&&islower((unsigned char)f->params[j].type[0]))put(g,"%slac_struct_%d arg%d",j?",":"",detail,j);else put(g,"%s%s arg%d",j?",":"",ctype(g,kind,detail),j);}
     put(g,")%s\n",prototype?";":" {");
+}
+static void emit_return(Gen *g,Stmt *s,Function *f) {
+    Value v=emit(g,s->expr);
+    if(v.kind!=f->result_kind||v.detail!=f->result_detail)error(g,s->expr,"return type mismatch");
+    if(s->next)fail(g->path,s->line,s->col,"bootstrap return must end function");
+    if(v.kind==K_POINT){
+        if(v.mode||v.stack!=f->result_stack)error(g,s->expr,"structure return storage or borrow mismatch");
+        if(v.stack){Value copy=copy_structure(g,v,1);cleanup(g,copy.temp);put(g,"  return *%s;\n",copy.code);return;}
+    }
+    if(v.kind==K_INT){put(g,"  lac_int return_value = lac_copy_i(%s);\n",v.code);cleanup(g,-1);put(g,"  return return_value;\n");}
+    else{cleanup(g,v.temp);put(g,"  return %s;\n",v.code);}
 }
 void generate(Program *p,const char *path,FILE *out,const char *runtime_path) {
     Gen g={0};g.program=p;g.path=path;g.out=out;g.entry=-1;g.imports=load_imports(p,path);
@@ -335,12 +365,12 @@ void generate(Program *p,const char *path,FILE *out,const char *runtime_path) {
     for(int i=0;i<p->nimports;i++)put(&g,"#include <%s>\n",p->imports[i]);
     for(int i=0;i<g.nstructures;i++){put(&g,"typedef struct {\n");for(int j=0;j<g.structures[i].nfields;j++)put(&g,"  %s f%d;\n",ctype(&g,g.structures[i].kinds[j],-1),j);put(&g,"} lac_struct_%d;\n",i);}
     for(int i=0;i<g.nstructures;i++){
-        put(&g,"static void lac_drop_struct_%d(lac_struct_%d *p) {\n",i,i);
+        put(&g,"static void lac_clear_struct_%d(lac_struct_%d *p) {\n",i,i);
         for(int j=0;j<g.structures[i].nfields;j++){
             int kind=g.structures[i].kinds[j];
             if(kind==K_INT||kind==K_STR)put(&g,"  %s(p->f%d);\n",kind==K_INT?"lac_drop_i":"lac_drop_s",j);
         }
-        put(&g,"  free(p);\n}\n");
+        put(&g,"}\nstatic void lac_drop_struct_%d(lac_struct_%d *p) { lac_clear_struct_%d(p);free(p); }\n",i,i,i);
     }
     for(int i=0;i<p->nfunctions;i++)infer_function(&g,i);
     for(int i=0;i<p->nfunctions;i++)signature(&g,i,1);
@@ -348,10 +378,12 @@ void generate(Program *p,const char *path,FILE *out,const char *runtime_path) {
         Function *f=&p->functions[i];parameters(&g,i);g.return_kind=f->result_kind;signature(&g,i,0);
         if(i==g.entry)put(&g,"  (void)arg0;\n");
         else for(int j=0;j<f->nparams;j++)put(&g,"  (void)arg%d;\n",j);
+        if(i!=g.entry)for(int j=0;j<f->nparams;j++)if(g.symbols[j].value.kind==K_POINT&&g.symbols[j].value.stack)g.symbols[j].value=copy_structure(&g,g.symbols[j].value,1);
         int returned=0;
-        for(Stmt *s=f->body;s;s=s->next){if(returned)fail(path,s->line,s->col,"unreachable statement");Value v=emit(&g,s->expr);
+        for(Stmt *s=f->body;s;s=s->next){if(returned)fail(path,s->line,s->col,"unreachable statement");
+            if(s->kind==S_RETURN){emit_return(&g,s,f);returned=1;continue;}
+            Value v=emit(&g,s->expr);
             if(s->kind==S_BIND)binding(&g,s,v);
-            else if(s->kind==S_RETURN){if(v.kind!=g.return_kind||v.detail!=f->result_detail)error(&g,s->expr,"return type mismatch");if(v.kind==K_POINT&&v.mode)error(&g,s->expr,"cannot return a borrowed object as owner");if(s->next)fail(path,s->line,s->col,"bootstrap return must end function");if(v.kind==K_INT){put(&g,"  lac_int return_value = lac_copy_i(%s);\n",v.code);cleanup(&g,-1);put(&g,"  return return_value;\n");}else{cleanup(&g,v.temp);put(&g,"  return %s;\n",v.code);}returned=1;}
         }
         if(!returned){if(g.return_kind!=K_VOID)fail(path,f->line,1,"missing return value");cleanup(&g,-1);}put(&g,"}\n");
     }

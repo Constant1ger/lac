@@ -4,13 +4,22 @@ static int accept(Parser *p,int k) { if(p->token.kind!=k)return 0;next(p);return
 static void expect(Parser *p,int k) { if(!accept(p,k))fail(p->lexer.path,p->token.line,p->token.col,"expected '%c', got '%s'",k,p->token.text); }
 static char *name(Parser *p) { if(p->token.kind!=T_ID)fail(p->lexer.path,p->token.line,p->token.col,"expected name");char *s=slice(p->token.text,strlen(p->token.text));next(p);return s; }
 static Expr *expression(Parser *p,int min);
+static Stmt *block(Parser *p);
 static Expr *node(Parser *p,int kind) { Expr *e=alloc(sizeof(*e));e->kind=kind;e->line=p->token.line;e->col=p->token.col;return e; }
 static int prec(int op) { switch(op){case '|':return 1;case '^':return 2;case '&':return 3;case '#':case '~':case '>':case '<':return 4;case '+':case '-':return 5;case '*':case '/':case '%':return 6;default:return 0;} }
+static Expr *lambda(Parser *p) {
+    if(!p->program)fail(p->lexer.path,p->token.line,p->token.col,"lambda is not allowed in interpolation");
+    if(p->program->nfunctions==64)fail(p->lexer.path,p->token.line,p->token.col,"too many functions");
+    Expr *e=node(p,E_LAMBDA);e->op=p->program->nfunctions++;
+    Function *f=&p->program->functions[e->op];char name[32];snprintf(name,sizeof(name),"_lambda_%d",e->op);
+    f->name=slice(name,strlen(name));f->line=e->line;f->assigned=1;f->result_kind=f->result_detail=-1;f->body=block(p);return e;
+}
 static Expr *primary(Parser *p) {
     Expr *e;
     if(p->token.kind==T_NUM||p->token.kind==T_STR||p->token.kind==T_ID){
         int k=p->token.kind;e=node(p,k==T_NUM?E_NUM:k==T_STR?E_STR:E_NAME);e->name=slice(p->token.text,strlen(p->token.text));next(p);
-    } else if(accept(p,'(')){e=expression(p,1);expect(p,')');}
+    } else if(p->token.kind=='{')e=lambda(p);
+    else if(accept(p,'(')){if(accept(p,')'))e=lambda(p);else{e=expression(p,1);expect(p,')');}}
     else if(accept(p,'.')) {
         e=alloc(sizeof(*e));e->kind=E_IT;e->line=p->token.line;e->col=p->token.col;
         if(p->token.kind==T_ID){Expr *f=node(p,E_FIELD);f->left=e;f->name=name(p);e=f;}
@@ -88,7 +97,7 @@ static Stmt *block(Parser *p) {
     return first;
 }
 Program parse(const char *source,const char *path) {
-    Parser p={{source,path,0,1,1},{0,0,0,NULL}};next(&p);Program program={0};
+    Program program={0};Parser p={{source,path,0,1,1},{0,0,0,NULL},&program};next(&p);
     while(p.token.kind!=T_EOF) {
         if(accept(&p,';'))continue;
         if(p.token.kind==T_ID&&!strcmp(p.token.text,"import")) {
@@ -102,6 +111,7 @@ Program parse(const char *source,const char *path) {
         Function *f=&program.functions[program.nfunctions++];f->line=p.token.line;f->result_kind=-1;f->result_detail=-1;
         if(p.token.kind==T_ID){f->name=name(&p);f->assigned=accept(&p,'=');}
         else {char anon[32];snprintf(anon,sizeof(anon),"_anonymous_%d",program.nfunctions);f->name=slice(anon,strlen(anon));}
+        if(p.token.kind!='{'){
         expect(&p,'(');
         if(!accept(&p,')'))do {
             if(f->nparams==16)fail(path,p.token.line,p.token.col,"too many parameters");
@@ -112,12 +122,13 @@ Program parse(const char *source,const char *path) {
             expect(&p,',');
         }while(1);
         if(accept(&p,':'))f->result=name(&p);
+        }
         f->body=block(&p);
     }
     free(p.token.text);return program;
 }
 Expr *parse_expression_text(const char *source,const char *path) {
-    Parser p={{source,path,0,1,1},{0,0,0,NULL}};next(&p);Expr *e=expression(&p,1);
+    Parser p={{source,path,0,1,1},{0,0,0,NULL},NULL};next(&p);Expr *e=expression(&p,1);
     if(p.token.kind!=T_EOF)fail(path,p.token.line,p.token.col,"unexpected interpolation token '%s'",p.token.text);
     free(p.token.text);return e;
 }

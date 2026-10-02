@@ -27,7 +27,7 @@ $negatives = @{
     duplicateType = '(){A(n:i) A(n:i)}'
     duplicateField = '(){A(n:i,n:S)}'
     mixedDeclaration = '(){A(n:i,tx="text")}'
-    lowerType = '(){a(n:i)}'
+    stackCasing = '(){a(n:i) B=a(1)}'
     copyBorrow = '(){A(tx:S) B=A("text") C=A(B)}'
     missingField = '(){A(tx:S) B=A("text") B.bad.pr}'
     movedStruct = '(){A(tx:S) B=A("text") C=B B.tx.pr}'
