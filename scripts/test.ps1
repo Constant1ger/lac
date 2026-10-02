@@ -50,7 +50,7 @@ Compile-Example '(){arr=i[0] prl(arr[0])}' $taskArrayBounds
 $taskArrayError = & $taskArrayBounds 2>&1
 if ($LASTEXITCODE -eq 0 -or "$taskArrayError" -notmatch 'out of bounds') { throw 'Numeric array bounds check failed' }
 $taskStrict = & $taskLac 'f=(x:d,y:d){@x-y} (){x=128 y=138 prl(f(x,y))}' '@' (Join-Path $taskTests 'strict.exe') 2>&1
-if ($LASTEXITCODE -eq 0 -or "$taskStrict" -notmatch 'expected d, got int64_t') { throw "Strict argument check failed: $taskStrict" }
+if ($LASTEXITCODE -eq 0 -or "$taskStrict" -notmatch 'expected d, got i') { throw "Strict argument check failed: $taskStrict" }
 $taskNegatives = @{
     unknown = 'main(A){prl(missing)}'
     copy = 'main(A){P=Point(x=1,y=2) Q=Point(P)}'
@@ -78,4 +78,5 @@ foreach ($item in $taskNegatives.GetEnumerator()) {
     $taskLog = & $taskLac $item.Value '@' (Join-Path $taskTests "$($item.Key).exe") 2>&1
     if ($LASTEXITCODE -eq 0 -or "$taskLog" -notmatch 'error:') { throw "Negative case failed: $($item.Key)" }
 }
+& (Join-Path $PSScriptRoot 'test-bignum.ps1')
 Write-Output 'PASS: zero/zero2, arrays/fe/fld, empty fold, floating types, C imports, branch short circuit, strict calls and 21 compiler diagnostics'

@@ -24,6 +24,10 @@ static int ckind(CXType t,int parameter) {
     default:return K_UNSUPPORTED;
     }
 }
+static int unsigned_type(CXType t) {
+    enum CXTypeKind k=clang_getCanonicalType(t).kind;
+    return k==CXType_Char_U||k==CXType_UChar||k==CXType_UShort||k==CXType_UInt||k==CXType_ULong||k==CXType_ULongLong;
+}
 static enum CXChildVisitResult visit(CXCursor cursor,CXCursor parent,CXClientData data) {
     (void)parent;Imports *imports=data;
     if(clang_getCursorKind(cursor)!=CXCursor_FunctionDecl)return CXChildVisit_Recurse;
@@ -31,9 +35,9 @@ static enum CXChildVisitResult visit(CXCursor cursor,CXCursor parent,CXClientDat
     for(int i=0;i<imports->count;i++)if(!strcmp(imports->functions[i].name,name)){free(name);return CXChildVisit_Continue;}
     if(imports->count==1024){free(name);return CXChildVisit_Break;}
     Foreign *f=&imports->functions[imports->count++];f->name=name;CXType type=clang_getCursorType(cursor);
-    f->result=ckind(clang_getResultType(type),0);f->nargs=clang_Cursor_getNumArguments(cursor);f->variadic=clang_isFunctionTypeVariadic(type);
+    f->result=ckind(clang_getResultType(type),0);f->unsigned_result=unsigned_type(clang_getResultType(type));f->nargs=clang_Cursor_getNumArguments(cursor);f->variadic=clang_isFunctionTypeVariadic(type);
     if(f->nargs<0||f->nargs>16){f->result=K_UNSUPPORTED;f->nargs=0;return CXChildVisit_Continue;}
-    for(int i=0;i<f->nargs;i++){CXType p=clang_getCursorType(clang_Cursor_getArgument(cursor,(unsigned)i));f->params[i]=ckind(p,1);f->casts[i]=cx_text(clang_getTypeSpelling(p));}
+    for(int i=0;i<f->nargs;i++){CXType p=clang_getCursorType(clang_Cursor_getArgument(cursor,(unsigned)i));f->params[i]=ckind(p,1);f->unsigned_params[i]=unsigned_type(p);f->casts[i]=cx_text(clang_getTypeSpelling(p));}
     return CXChildVisit_Continue;
 }
 Imports *load_imports(Program *program,const char *path) {

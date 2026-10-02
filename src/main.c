@@ -11,6 +11,12 @@
 #ifndef LAC_RUNTIME_PATH
 #define LAC_RUNTIME_PATH "runtime/lac_runtime.h"
 #endif
+#ifndef LAC_TOMMATH_LIBRARY
+#define LAC_TOMMATH_LIBRARY "-ltommath"
+#endif
+#ifndef LAC_TOMMATH_INCLUDE
+#define LAC_TOMMATH_INCLUDE ""
+#endif
 static char *read_source(const char *path) {
     FILE *f=fopen(path,"rb");if(!f)return NULL;
     if(fseek(f,0,SEEK_END)){fclose(f);return NULL;}long n=ftell(f);if(n<0){fclose(f);return NULL;}rewind(f);
@@ -37,11 +43,12 @@ static char *win_quote(const char *s) {
 static int compile_c(const char *cc,const char *source,const char *output) {
 #ifdef _WIN32
     char *src=win_quote(source),*dest=win_quote(output),*command=win_quote(cc);
-    const char *args[]={command,"-std=c11","-O0",src,"-o",dest,NULL};
-    intptr_t status=_spawnvp(_P_WAIT,cc,args);free(src);free(dest);free(command);
+    char *library=win_quote(LAC_TOMMATH_LIBRARY);char inc[1024];snprintf(inc,sizeof(inc),"-I%s",LAC_TOMMATH_INCLUDE);char *include=win_quote(inc);
+    const char *args[]={command,"-std=c11","-O0",include,src,library,"-o",dest,NULL};
+    intptr_t status=_spawnvp(_P_WAIT,cc,args);free(src);free(dest);free(command);free(library);free(include);
     if(status==-1){fprintf(stderr,"lac: cannot run C compiler '%s'; set LAC_CC\n",cc);return 1;}return (int)status;
 #else
-    pid_t pid=fork();if(pid<0)return 1;if(!pid){execlp(cc,cc,"-std=c11","-O0",source,"-o",output,(char*)NULL);perror("lac: C compiler");_exit(127);}int status;if(waitpid(pid,&status,0)<0)return 1;return WIFEXITED(status)?WEXITSTATUS(status):1;
+    pid_t pid=fork();if(pid<0)return 1;if(!pid){char inc[1024];snprintf(inc,sizeof(inc),"-I%s",LAC_TOMMATH_INCLUDE);execlp(cc,cc,"-std=c11","-O0",inc,source,LAC_TOMMATH_LIBRARY,"-o",output,(char*)NULL);perror("lac: C compiler");_exit(127);}int status;if(waitpid(pid,&status,0)<0)return 1;return WIFEXITED(status)?WEXITSTATUS(status):1;
 #endif
 }
 int main(int argc,char **argv) {

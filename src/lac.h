@@ -26,7 +26,7 @@ typedef struct { char *name, *type; int mode; } Param;
 typedef struct { char *name, *result; Param params[16]; int nparams; Stmt *body; int line, assigned, inferring, result_kind, result_detail; } Function;
 typedef struct { Function functions[64]; int nfunctions; char *imports[32]; int nimports; } Program;
 typedef struct { Lexer lexer; Token token; } Parser;
-typedef struct { char *name; int result, nargs, variadic; int params[16]; char *casts[16]; } Foreign;
+typedef struct { char *name; int result, nargs, variadic, unsigned_result; int params[16], unsigned_params[16]; char *casts[16]; } Foreign;
 typedef struct { Foreign functions[1024]; int count; } Imports;
 Imports *load_imports(Program *program, const char *path);
 void free_imports(Imports *imports);
